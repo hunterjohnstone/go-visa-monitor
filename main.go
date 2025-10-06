@@ -338,12 +338,6 @@ func (m *Monitor) makeAppointmentRequest(ctx context.Context, requestURL, formDa
 
 	log.Printf("✅ Got appointment results (%d bytes)", len(body))
 
-	// Save the response for debugging
-	debugFilename := "debug_appointment_response.html"
-	if err := os.WriteFile(debugFilename, body, 0644); err == nil {
-		fmt.Printf("📄 Saved appointment response: %s\n", debugFilename)
-	}
-
 	return string(body), nil
 }
 
