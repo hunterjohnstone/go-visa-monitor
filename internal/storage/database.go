@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
 type Subscriber struct {
 	Email     string `json:"email"`
+	Location  string `json:"location,omitempty"`
+	Tier      string `json:"tier,omitempty"`
 	CreatedAt string `json:"createdAt,omitempty"`
 }
 
@@ -32,15 +35,51 @@ func NewDatabase(baseURL string) *Database {
 	}
 }
 
-// GetSubscribers fetches all subscribers from your API
-func (db *Database) GetSubscribers() ([]Subscriber, error) {
+// GetSubscribersByLocationAndTier returns just email strings (for easy use in alerts)
+func (db *Database) GetSubscribersByLocationAndTier(location, tier string) ([]string, error) {
+	subscribers, err := db.GetSubscribersWithFilters(location, tier)
+	if err != nil {
+		return nil, err
+	}
+
+	emails := make([]string, 0, len(subscribers))
+	for _, sub := range subscribers {
+		if sub.Email != "" && strings.Contains(sub.Email, "@") {
+			emails = append(emails, sub.Email)
+		}
+	}
+
+	if len(emails) == 0 {
+		return nil, fmt.Errorf("no valid email addresses found for location=%s, tier=%s", location, tier)
+	}
+
+	return emails, nil
+}
+
+// GetSubscribersWithFilters returns full Subscriber objects
+func (db *Database) GetSubscribersWithFilters(location, tier string) ([]Subscriber, error) {
 	if db.baseURL == "" {
 		return nil, fmt.Errorf("database URL not configured")
 	}
 
-	// Make request to your Vercel API endpoint (matches your bash script)
-	url := fmt.Sprintf("%s/api/admin/subscribers", db.baseURL)
-	req, err := http.NewRequest("GET", url, nil)
+	// Build URL with query parameters
+	apiURL := fmt.Sprintf("%s/api/admin/subscribers", db.baseURL)
+
+	// Add query parameters if provided
+	var queryParams url.Values
+	if location != "" || tier != "" {
+		queryParams = url.Values{}
+		if location != "" {
+			queryParams.Add("location", location)
+		}
+		if tier != "" {
+			queryParams.Add("tier", tier)
+		}
+		apiURL = apiURL + "?" + queryParams.Encode()
+	}
+
+	req, err := http.NewRequest("GET", apiURL, nil)
+
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -54,7 +93,6 @@ func (db *Database) GetSubscribers() ([]Subscriber, error) {
 	}
 	defer resp.Body.Close()
 
-	// Read response body
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read response body: %w", err)
@@ -77,39 +115,31 @@ func (db *Database) GetSubscribers() ([]Subscriber, error) {
 		return nil, fmt.Errorf("API request unsuccessful")
 	}
 
-	fmt.Printf("✅ Found %d subscribers in database\n", result.Count)
+	fmt.Printf("✅ Found %d subscribers for location=%s, tier=%s\n",
+		result.Count, location, tier)
 	return result.Subscribers, nil
 }
 
-// GetSubscriberEmails returns just the email addresses (used by monitor)
-func (db *Database) GetSubscriberEmails() ([]string, error) {
-	subscribers, err := db.GetSubscribers()
-	if err != nil {
-		return nil, err
-	}
-
-	emails := make([]string, 0, len(subscribers))
-	for _, sub := range subscribers {
-		if sub.Email != "" && strings.Contains(sub.Email, "@") {
-			emails = append(emails, sub.Email)
-		}
-	}
-
-	if len(emails) == 0 {
-		return nil, fmt.Errorf("no valid email addresses found in subscribers")
-	}
-
-	return emails, nil
+// GetSubscribers returns all subscribers (full objects)
+func (db *Database) GetSubscribers() ([]Subscriber, error) {
+	return db.GetSubscribersWithFilters("", "")
 }
 
-// AddSubscriber adds a new subscriber (for future use)
-func (db *Database) AddSubscriber(email string) error {
+// GetSubscriberEmails returns just email strings (backward compatibility)
+func (db *Database) GetSubscriberEmails() ([]string, error) {
+	return db.GetSubscribersByLocationAndTier("", "")
+}
+
+// (for future use)
+func (db *Database) AddSubscriber(email, location, tier string) error {
 	if db.baseURL == "" {
 		return fmt.Errorf("database URL not configured")
 	}
 
 	payload := map[string]string{
-		"email": email,
+		"email":    email,
+		"location": location,
+		"tier":     tier,
 	}
 
 	jsonData, err := json.Marshal(payload)
@@ -117,7 +147,7 @@ func (db *Database) AddSubscriber(email string) error {
 		return fmt.Errorf("marshal payload: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/api/subscribers", db.baseURL)
+	url := fmt.Sprintf("%s/api/submit", db.baseURL)
 	req, err := http.NewRequest("POST", url, strings.NewReader(string(jsonData)))
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
@@ -139,7 +169,7 @@ func (db *Database) AddSubscriber(email string) error {
 			resp.StatusCode, resp.Status, string(body))
 	}
 
-	fmt.Printf("✅ Subscriber added: %s\n", email)
+	fmt.Printf("✅ Subscriber added: %s (location: %s, tier: %s)\n", email, location, tier)
 	return nil
 }
 
@@ -149,23 +179,10 @@ func (db *Database) HealthCheck() error {
 		return fmt.Errorf("database URL not configured")
 	}
 
-	// Try a more common endpoint, or remove health check temporarily
-	req, err := http.NewRequest("GET", db.baseURL+"/api/health", nil)
+	// Try the subscribers endpoint for health check
+	_, err := db.GetSubscribers()
 	if err != nil {
-		fmt.Println(db.baseURL + "/api/health")
-		return fmt.Errorf("create health check request: %w", err)
-	}
-
-	resp, err := db.client.Do(req)
-	if err != nil {
-		fmt.Println(db.baseURL + "/api/health")
-		return fmt.Errorf("health check request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Accept any 2xx status as healthy, or remove this check entirely
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("health check failed: status %d %s", resp.StatusCode, resp.Status)
+		return fmt.Errorf("health check failed: %w", err)
 	}
 
 	fmt.Println("✅ Database connection healthy")

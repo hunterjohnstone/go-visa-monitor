@@ -22,8 +22,29 @@ import (
 	"go-visa-monitor/internal/embassy"
 	"go-visa-monitor/internal/notifier"
 	"go-visa-monitor/internal/storage"
+
+	"github.com/aws/aws-lambda-go/lambda"
 )
 
+func BatchHandler(ctx context.Context) (string, error) {
+	log.Println("📦 Starting BATCH notifier (free users only)...")
+
+	cfg := &config.Config{
+		CaptchaAPIKey:  os.Getenv("CAPTCHA_API_KEY"),
+		SendGridAPIKey: os.Getenv("SENDGRID_API_KEY"),
+		DatabaseURL:    os.Getenv("DATABASE_URL"),
+		FrontendURL:    os.Getenv("FRONTEND_URL"),
+		CheckInterval:  5,
+		MaxConcurrency: 3,
+	}
+
+	monitor := NewMonitor(cfg)
+	monitor.RunBatchCheck(ctx)
+
+	return "Batch check completed", nil
+}
+
+// Modified Monitor with instant-specific logic
 type Monitor struct {
 	config        *config.Config
 	captchaSolver *captcha.Solver
@@ -36,12 +57,11 @@ func NewMonitor(cfg *config.Config) *Monitor {
 	captchaSolver := captcha.NewSolver(cfg.CaptchaAPIKey)
 	notifier := notifier.NewEmailNotifier(cfg.SendGridAPIKey)
 	database := storage.NewDatabase(cfg.DatabaseURL)
-	embassies := getEmbassiesToMonitor()
 
-	// Test database connection
-	if err := database.HealthCheck(); err != nil {
-		log.Printf("⚠️ Database health check failed: %v", err)
-		log.Printf("⚠️ Continuing with fallback email mode")
+	// Get embassies from your embassy package
+	var embassies []config.EmbassyConfig
+	for _, embassy := range embassy.Embassies {
+		embassies = append(embassies, embassy)
 	}
 
 	return &Monitor{
@@ -52,32 +72,18 @@ func NewMonitor(cfg *config.Config) *Monitor {
 		embassies:     embassies,
 	}
 }
+func (m *Monitor) RunBatchCheck(ctx context.Context) {
+	log.Println("🔍 Checking embassies for BATCH alerts (free users only)...")
 
-func getEmbassiesToMonitor() []config.EmbassyConfig {
-	var embassies []config.EmbassyConfig
-	for _, embassy := range embassy.Embassies {
-		embassies = append(embassies, embassy)
-	}
-	return embassies
-}
-func (m *Monitor) Run(ctx context.Context) {
-	log.Println("🚀 Running single embassy check...")
-	m.checkAllEmbassies(ctx)
-}
-
-func (m *Monitor) checkAllEmbassies(ctx context.Context) {
-	log.Printf("🔍 Checking %d embassies for appointments...", len(m.embassies))
-
+	// Same embassy checking logic but with batch alert handling
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, m.config.MaxConcurrency)
-
 	results := make(chan *embassy.CheckResult, len(m.embassies))
 
 	for _, embassyConfig := range m.embassies {
 		wg.Add(1)
 		go func(config config.EmbassyConfig) {
 			defer wg.Done()
-
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
@@ -92,85 +98,81 @@ func (m *Monitor) checkAllEmbassies(ctx context.Context) {
 	}()
 
 	for result := range results {
-		m.handleResult(result)
+		m.handleBatchResult(result) // Use batch-specific handler
 	}
-
-	log.Println("✅ Completed embassy check cycle")
 }
 
-func (m *Monitor) handleResult(result *embassy.CheckResult) {
+func (m *Monitor) handleBatchResult(result *embassy.CheckResult) {
 	if result.Error != nil {
 		log.Printf("❌ Error checking %s: %v", result.Embassy, result.Error)
 		return
 	}
 
 	if result.Available {
-		log.Printf("🚨🚨🚨 APPOINTMENTS AVAILABLE in %s! 🚨🚨🚨", result.Embassy)
-		m.sendAlerts(result)
+		log.Printf("🚨 APPOINTMENTS AVAILABLE in %s! Sending BATCH alerts", result.Embassy)
+		m.SendBatchAlerts(result) // Only sends to free users
 	} else {
-		log.Printf("✅ No appointments in %s (checked at %s)", result.Embassy, result.Timestamp.Format("15:04:05"))
+		log.Printf("✅ No appointments in %s", result.Embassy)
 	}
 }
 
-func (m *Monitor) sendAlerts(result *embassy.CheckResult) {
-	log.Printf("🚨 Sending alerts for %s appointments!", result.Embassy)
+// SendBatchAlerts - ONLY for free users in specific location
+func (m *Monitor) SendBatchAlerts(result *embassy.CheckResult) {
+	location := m.getLocationFromEmbassy(result.Embassy)
+	log.Printf("📦 Sending BATCH alerts for %s appointments (location: %s)!", result.Embassy, location)
 
-	var subscribers []string
-	var err error
-
-	subscribers, err = m.database.GetSubscriberEmails()
+	// This ONLY gets free subscribers for this location
+	subscribers, err := m.database.GetSubscribersByLocationAndTier(location, "free")
 	if err != nil {
-		log.Printf("❌ Failed to fetch subscribers from database: %v", err)
-		subscribers = m.getFallbackEmails()
+		log.Printf("❌ Failed to fetch free subscribers for %s: %v", location, err)
+		return // Don't fallback for free tier
 	}
 
 	if len(subscribers) == 0 {
-		log.Printf("⚠️ No subscribers found, using fallback emails")
-		subscribers = m.getFallbackEmails()
+		log.Printf("ℹ️ No free subscribers found for %s", location)
+		return
 	}
 
-	log.Printf("📧 Sending alerts to %d subscribers", len(subscribers))
+	log.Printf("📧 Sending batch alerts to %d free subscribers in %s", len(subscribers), location)
 
 	successCount := 0
 	for _, email := range subscribers {
 		err := m.notifier.SendAppointmentAlert(email, result.Embassy, m.config.FrontendURL)
 		if err != nil {
-			log.Printf("❌ Failed to send alert to %s: %v", email, err)
+			log.Printf("❌ Failed to send batch alert to %s: %v", email, err)
 		} else {
-			log.Printf("✅ Alert sent to: %s", email)
+			log.Printf("✅ Batch alert sent to: %s", email)
 			successCount++
 		}
 		time.Sleep(1 * time.Second)
 	}
 
-	log.Printf("📧 Successfully sent %d/%d alerts for %s", successCount, len(subscribers), result.Embassy)
+	log.Printf("📧 Successfully sent %d/%d batch alerts for %s", successCount, len(subscribers), result.Embassy)
 }
 
-func (m *Monitor) getFallbackEmails() []string {
-	testEmail := os.Getenv("TEST_EMAIL")
-	if testEmail != "" {
-		return []string{testEmail}
+func (m *Monitor) getLocationFromEmbassy(embassyName string) string {
+	locationMap := map[string]string{
+		"Windhoek":  "windhoek",
+		"New Delhi": "newdelhi",
+		"Istanbul":  "istanbul",
+		"Moscow":    "moscow",
 	}
-	return []string{"hunterjohnst1@gmail.com"}
-}
 
-func (m *Monitor) debugAnalysis(html string) {
-	log.Printf("Content analysis:")
-	patterns := []string{"termin", "appointment", "available", "verfügbar"}
+	if location, exists := locationMap[embassyName]; exists {
+		return location
+	}
 
-	for _, pattern := range patterns {
-		if strings.Contains(strings.ToLower(html), strings.ToLower(pattern)) {
-			lines := strings.Split(html, "\n")
-			for i, line := range lines {
-				if strings.Contains(strings.ToLower(line), strings.ToLower(pattern)) {
-					log.Printf("  Found '%s': %s", pattern, strings.TrimSpace(line))
-					if i >= 3 {
-						break
-					}
-				}
-			}
+	// check for partial matches if above didnt work
+	lowerEmbassyName := strings.ToLower(embassyName)
+	for key, location := range locationMap {
+		if strings.Contains(lowerEmbassyName, strings.ToLower(key)) {
+			log.Printf("🔍 Matched embassy '%s' to location '%s' via partial match", embassyName, location)
+			return location
 		}
 	}
+
+	log.Printf("⚠️ No location mapping found for embassy: %s", embassyName)
+	return "windhoek"
 }
 
 func (m *Monitor) checkEmbassy(ctx context.Context, embassyConfig config.EmbassyConfig) *embassy.CheckResult {
@@ -275,6 +277,80 @@ func (m *Monitor) checkAppointments(ctx context.Context, embassyConfig config.Em
 	return available, nil
 }
 
+func (m *Monitor) debugAnalysis(html string) {
+	log.Printf("Content analysis:")
+	patterns := []string{"termin", "appointment", "available", "verfügbar"}
+
+	for _, pattern := range patterns {
+		if strings.Contains(strings.ToLower(html), strings.ToLower(pattern)) {
+			lines := strings.Split(html, "\n")
+			for i, line := range lines {
+				if strings.Contains(strings.ToLower(line), strings.ToLower(pattern)) {
+					log.Printf("  Found '%s': %s", pattern, strings.TrimSpace(line))
+					if i >= 3 {
+						break
+					}
+				}
+			}
+		}
+	}
+}
+
+// func (m *Monitor) analyzeAppointmentResults(html string) (bool, error) {
+// 	// TEMPORARY: Force appointments to be "available" for testing
+// 	log.Printf("🚨 TEST MODE: Forcing appointments to be available")
+// 	return true, nil
+
+// 	// Comment out the rest of the function for now:
+// 	/*
+// 	   negativePatterns := []string{
+// 	       "keine Termine",
+// 	       "leider keine",
+// 	       // ... rest of your patterns
+// 	   }
+
+// 	   // ... rest of your logic
+// 	*/
+// }
+
+func (m *Monitor) analyzeAppointmentResults(html string) (bool, error) {
+	// Negative patterns from your bash script
+	negativePatterns := []string{
+		"keine Termine",
+		"leider keine",
+		"Es sind zur Zeit",
+		"nicht verfügbar",
+		"no appointments",
+		"Unfortunately, there are",
+		"currently no",
+		"at this time",
+		"will be made available",
+		"freigeschaltet",
+		"regelmäßigen Abständen",
+	}
+
+	// If CAPTCHA form appears, solution was wrong
+	if strings.Contains(html, "captchaText") {
+		// Check if there's an error message about the CAPTCHA
+		if strings.Contains(strings.ToLower(html), "falsch") || strings.Contains(strings.ToLower(html), "wrong") {
+			return false, fmt.Errorf("CAPTCHA failed - solution was wrong (explicit error)")
+		}
+		return false, fmt.Errorf("CAPTCHA failed - solution was wrong")
+	}
+
+	// Check for negative indicators
+	for _, pattern := range negativePatterns {
+		if strings.Contains(strings.ToLower(html), strings.ToLower(pattern)) {
+			log.Printf("✅ Found negative indicator: '%s'", pattern)
+			return false, nil // No appointments
+		}
+	}
+
+	// No negative patterns found - possible appointments!
+	log.Printf("🚨 No negative indicators found - appointments might be available!")
+	return true, nil
+}
+
 func (m *Monitor) makeAppointmentRequest(ctx context.Context, requestURL, formData string, cookies []*http.Cookie) (string, error) {
 	// make HTTP client cookie jar
 	jar, err := cookiejar.New(nil)
@@ -340,43 +416,12 @@ func (m *Monitor) makeAppointmentRequest(ctx context.Context, requestURL, formDa
 
 	return string(body), nil
 }
-
-func (m *Monitor) analyzeAppointmentResults(html string) (bool, error) {
-	// Negative patterns from your bash script
-	negativePatterns := []string{
-		"keine Termine",
-		"leider keine",
-		"Es sind zur Zeit",
-		"nicht verfügbar",
-		"no appointments",
-		"Unfortunately, there are",
-		"currently no",
-		"at this time",
-		"will be made available",
-		"freigeschaltet",
-		"regelmäßigen Abständen",
+func main() {
+	if os.Getenv("LOCAL_DEV") == "true" {
+		runLocal()
+	} else {
+		lambda.Start(BatchHandler)
 	}
-
-	// If CAPTCHA form appears, solution was wrong
-	if strings.Contains(html, "captchaText") {
-		// Check if there's an error message about the CAPTCHA
-		if strings.Contains(strings.ToLower(html), "falsch") || strings.Contains(strings.ToLower(html), "wrong") {
-			return false, fmt.Errorf("CAPTCHA failed - solution was wrong (explicit error)")
-		}
-		return false, fmt.Errorf("CAPTCHA failed - solution was wrong")
-	}
-
-	// Check for negative indicators
-	for _, pattern := range negativePatterns {
-		if strings.Contains(strings.ToLower(html), strings.ToLower(pattern)) {
-			log.Printf("✅ Found negative indicator: '%s'", pattern)
-			return false, nil // No appointments
-		}
-	}
-
-	// No negative patterns found - possible appointments!
-	log.Printf("🚨 No negative indicators found - appointments might be available!")
-	return true, nil
 }
 
 func loadEnvFile(filename string) error {
@@ -410,8 +455,8 @@ func loadEnvFile(filename string) error {
 	return scanner.Err()
 }
 
-func main() {
-	// Load .env file first
+func runLocal() {
+	// Load .env file first (same as your original main)
 	if err := loadEnvFile(".env"); err != nil {
 		log.Printf("⚠️ Could not load .env file: %v", err)
 		log.Printf("⚠️ Continuing with system environment variables only")
@@ -444,6 +489,7 @@ func main() {
 		cancel()
 	}()
 
-	monitor.Run(ctx)
+	log.Println("🚀 Starting LOCAL embassy check...")
+	monitor.RunBatchCheck(ctx)
 	log.Println("Monitor stopped gracefully")
 }
