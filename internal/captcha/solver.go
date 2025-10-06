@@ -11,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -157,19 +156,20 @@ func (s *Solver) extractJsessionID(html string) (string, error) {
 	return "", fmt.Errorf("jsessionid not found in HTML")
 }
 func (s *Solver) extractCaptchaFromHTML(html string) ([]byte, error) {
-	// Debug: save the HTML to see what we're working with
-	debugFilename := "debug_captcha_page.html"
-	if err := os.WriteFile(debugFilename, []byte(html), 0644); err == nil {
-		fmt.Printf("📄 Saved debug HTML: %s\n", debugFilename)
-	}
+	// ✅ REPLACE file saving with logging
+	fmt.Printf("📄 CAPTCHA HTML received (%d bytes)\n", len(html))
 
-	// Try multiple regex patterns - the base64 might be truncated by quotes in the data
+	// Log a sample of the HTML for debugging
+	sampleLength := min(500, len(html))
+	fmt.Printf("🔍 HTML sample: %s\n", html[:sampleLength])
+
+	// Try multiple regex patterns (same as before)
 	patterns := []string{
-		`data:image/jpg;base64,([A-Za-z0-9+/=]+)`, // Strict base64 chars only
+		`data:image/jpg;base64,([A-Za-z0-9+/=]+)`,
 		`data:image/jpeg;base64,([A-Za-z0-9+/=]+)`,
-		`data:image/jpg;base64,([^"'>]+)`,            // Stop at any HTML tag end
-		`src="data:image/jpg;base64,([^"]+)"`,        // Full src attribute
-		`data:image/jpg;base64,([A-Za-z0-9+/]{20,})`, // At least 20 base64 chars
+		`data:image/jpg;base64,([^"'>]+)`,
+		`src="data:image/jpg;base64,([^"]+)"`,
+		`data:image/jpg;base64,([A-Za-z0-9+/]{20,})`,
 	}
 
 	for i, pattern := range patterns {
@@ -181,7 +181,6 @@ func (s *Solver) extractCaptchaFromHTML(html string) ([]byte, error) {
 			fmt.Printf("🔍 Found CAPTCHA with pattern %d: %s\n", i+1, pattern)
 			fmt.Printf("📏 Base64 data length: %d characters\n", len(base64Data))
 
-			// Check if it looks like valid base64 (ends with = or has proper padding)
 			if len(base64Data) < 100 {
 				fmt.Printf("⚠️ Base64 data seems too short: %d chars\n", len(base64Data))
 				continue
@@ -191,25 +190,20 @@ func (s *Solver) extractCaptchaFromHTML(html string) ([]byte, error) {
 			imageData, err := base64.StdEncoding.DecodeString(base64Data)
 			if err != nil {
 				fmt.Printf("❌ Base64 decode failed: %v\n", err)
-				fmt.Printf("🔍 First 200 chars: %s\n", base64Data[:min(200, len(base64Data))])
-				fmt.Printf("🔍 Last 50 chars: %s\n", base64Data[max(0, len(base64Data)-50):])
+				fmt.Printf("🔍 First 100 chars: %s\n", base64Data[:min(100, len(base64Data))])
 				continue
 			}
 
 			fmt.Printf("✅ CAPTCHA image extracted (%d bytes)\n", len(imageData))
 
-			// Save the extracted image for debugging
-			debugImgFilename := fmt.Sprintf("debug_captcha_pattern_%d.jpg", i+1)
-			if err := os.WriteFile(debugImgFilename, imageData, 0644); err == nil {
-				fmt.Printf("📸 Saved debug CAPTCHA image: %s\n", debugImgFilename)
-			}
+			// ✅ REMOVED file saving - just log success
+			fmt.Printf("📸 CAPTCHA image ready for 2captcha\n")
 
 			return imageData, nil
 		}
 	}
 
-	// If all patterns fail, let's manually search for the base64
-	fmt.Printf("🔍 Manual search for base64 patterns...\n")
+	// Manual extraction (same logic but without file ops)
 	manualExtract, err := s.manualExtractCaptcha(html)
 	if err == nil {
 		return manualExtract, nil
@@ -219,7 +213,6 @@ func (s *Solver) extractCaptchaFromHTML(html string) ([]byte, error) {
 }
 
 func (s *Solver) manualExtractCaptcha(html string) ([]byte, error) {
-	// Look for the base64 data more carefully
 	startMarker := "data:image/jpg;base64,"
 	startIdx := strings.Index(html, startMarker)
 	if startIdx == -1 {
@@ -228,7 +221,7 @@ func (s *Solver) manualExtractCaptcha(html string) ([]byte, error) {
 
 	startIdx += len(startMarker)
 
-	// Find where the base64 ends (could be at quote, space, or tag)
+	// Find where the base64 ends
 	endMarkers := []string{`"`, `'`, ` `, `>`, `</`}
 	var endIdx int = len(html)
 

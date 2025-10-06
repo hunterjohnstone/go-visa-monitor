@@ -9,7 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/cookiejar"
-	"net/url" // Add this import
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -60,26 +60,9 @@ func getEmbassiesToMonitor() []config.EmbassyConfig {
 	}
 	return embassies
 }
-
 func (m *Monitor) Run(ctx context.Context) {
-	log.Println("🚀 Starting visa appointment monitor...")
-
-	// Run initial check immediately
+	log.Println("🚀 Running single embassy check...")
 	m.checkAllEmbassies(ctx)
-
-	// Then run on interval
-	ticker := time.NewTicker(time.Duration(m.config.CheckInterval) * time.Minute)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			m.checkAllEmbassies(ctx)
-		case <-ctx.Done():
-			log.Println("Shutting down monitor...")
-			return
-		}
-	}
 }
 
 func (m *Monitor) checkAllEmbassies(ctx context.Context) {
@@ -171,33 +154,17 @@ func (m *Monitor) getFallbackEmails() []string {
 	return []string{"hunterjohnst1@gmail.com"}
 }
 
-func (m *Monitor) saveAppointmentResults(html, embassyName string) {
-	// Save HTML for manual review (like your bash script)
-	filename := fmt.Sprintf("potential_appointments_%s_%s.html",
-		embassyName,
-		time.Now().Format("20060102_150405"))
-
-	err := os.WriteFile(filename, []byte(html), 0644)
-	if err != nil {
-		log.Printf("❌ Failed to save appointment results: %v", err)
-	} else {
-		log.Printf("✅ Saved potential appointments file: %s", filename)
-	}
-}
-
-// Also add debug analysis like your bash script
 func (m *Monitor) debugAnalysis(html string) {
 	log.Printf("Content analysis:")
-	patterns := []string{"termin", "appointment", "available", "verfügbar", "wählen", "select", "calendar", "kalender"}
+	patterns := []string{"termin", "appointment", "available", "verfügbar"}
 
 	for _, pattern := range patterns {
 		if strings.Contains(strings.ToLower(html), strings.ToLower(pattern)) {
-			// Extract sample lines (simplified version of grep)
 			lines := strings.Split(html, "\n")
 			for i, line := range lines {
 				if strings.Contains(strings.ToLower(line), strings.ToLower(pattern)) {
 					log.Printf("  Found '%s': %s", pattern, strings.TrimSpace(line))
-					if i >= 5 { // Limit output
+					if i >= 3 {
 						break
 					}
 				}
@@ -231,7 +198,7 @@ func (m *Monitor) checkEmbassy(ctx context.Context, embassyConfig config.Embassy
 			continue
 		}
 
-		// Now pass cookies to appointment check
+		// cookies to appointment check
 		available, err := m.checkAppointments(ctx, embassyConfig, solveResult.Text, solveResult.Cookies, solveResult.JsessionID)
 		if err != nil {
 			if strings.Contains(err.Error(), "CAPTCHA failed") {
@@ -285,13 +252,13 @@ func (m *Monitor) checkAppointments(ctx context.Context, embassyConfig config.Em
 
 	fmt.Printf("🔍 CAPTCHA text being sent: %s\n", captchaText)
 
-	// Make the appointment check request
+	// appointment check request
 	html, err := m.makeAppointmentRequest(ctx, appointmentURL, formData, cookies)
 	if err != nil {
 		return false, fmt.Errorf("appointment request failed: %w", err)
 	}
 
-	// Analyze the results
+	// Analyze
 	available, err := m.analyzeAppointmentResults(html)
 	if err != nil {
 		return false, err
@@ -300,7 +267,7 @@ func (m *Monitor) checkAppointments(ctx context.Context, embassyConfig config.Em
 	if available {
 		log.Printf("🚨 POSSIBLE APPOINTMENTS DETECTED in %s!", embassyConfig.Name)
 		m.debugAnalysis(html)
-		m.saveAppointmentResults(html, embassyConfig.Name)
+		// m.saveAppointmentResults(html, embassyConfig.Name)
 	} else {
 		log.Printf("No appointments available in %s", embassyConfig.Name)
 	}
@@ -309,13 +276,13 @@ func (m *Monitor) checkAppointments(ctx context.Context, embassyConfig config.Em
 }
 
 func (m *Monitor) makeAppointmentRequest(ctx context.Context, requestURL, formData string, cookies []*http.Cookie) (string, error) {
-	// Create HTTP client with cookie jar
+	// make HTTP client cookie jar
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return "", fmt.Errorf("create cookie jar: %w", err)
 	}
 
-	// Set the cookies from the CAPTCHA step
+	// Set the cookies
 	u, err := url.Parse(requestURL)
 	if err != nil {
 		return "", fmt.Errorf("parse URL: %w", err)
@@ -327,7 +294,6 @@ func (m *Monitor) makeAppointmentRequest(ctx context.Context, requestURL, formDa
 		Timeout: 30 * time.Second,
 	}
 
-	// Debug: Log what we're sending
 	fmt.Printf("🔍 Sending POST to: %s\n", requestURL)
 	fmt.Printf("🔍 Form data: %s\n", formData)
 	fmt.Printf("🔍 Cookies: %d cookies\n", len(cookies))
@@ -335,34 +301,32 @@ func (m *Monitor) makeAppointmentRequest(ctx context.Context, requestURL, formDa
 		fmt.Printf("   Cookie %d: %s=%s\n", i+1, cookie.Name, cookie.Value)
 	}
 
-	// Create POST request
+	//POST request
 	req, err := http.NewRequestWithContext(ctx, "POST", requestURL, bytes.NewBufferString(formData))
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}
 
-	// Set headers (matches your curl command exactly)
+	// Set headers
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; VisaMonitor/1.0)")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 
-	// Execute request
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Debug: Log response info
 	fmt.Printf("🔍 Response status: %d %s\n", resp.StatusCode, resp.Status)
 	fmt.Printf("🔍 Response cookies: %d cookies\n", len(resp.Cookies()))
 
-	// Check response status
+	// check status
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("embassy returned status: %d %s", resp.StatusCode, resp.Status)
 	}
 
-	// Read response body
+	// Read response bod
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("read response body: %w", err)
