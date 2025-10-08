@@ -22,19 +22,61 @@ import (
 	"go-visa-monitor/internal/config"
 	"go-visa-monitor/internal/embassy"
 	"go-visa-monitor/internal/notifier"
+	"go-visa-monitor/internal/proxy"
 	"go-visa-monitor/internal/storage"
 
 	"github.com/aws/aws-lambda-go/lambda"
 )
 
+// Load environment variables at package level
+func init() {
+	if os.Getenv("LOCAL_DEV") == "true" {
+		loadEnvFile(".env")
+	}
+}
+
+func loadEnvFile(filename string) error {
+	file, err := os.Open(filename)
+	if err != nil {
+		return fmt.Errorf("open .env file: %w", err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			key := strings.TrimSpace(parts[0])
+			value := strings.TrimSpace(parts[1])
+			value = strings.Trim(value, `"'`)
+			os.Setenv(key, value)
+		}
+	}
+	return scanner.Err()
+}
+
 func InstantHandler(ctx context.Context) (string, error) {
 	log.Println("⚡ Starting INSTANT notifier (paid users only)...")
+
+	// Log proxy status at startup
+	proxyCount := proxy.GetProxyCount()
+	if proxyCount > 0 {
+		log.Printf("🎯 Using %d proxies for requests", proxyCount)
+	} else {
+		log.Printf("⚠️ No proxies configured - using direct connections")
+	}
 
 	cfg := &config.Config{
 		CaptchaAPIKey:  os.Getenv("CAPTCHA_API_KEY"),
 		SendGridAPIKey: os.Getenv("SENDGRID_API_KEY"),
 		DatabaseURL:    os.Getenv("DATABASE_URL"),
 		FrontendURL:    os.Getenv("FRONTEND_URL"),
+		ApiKey:         os.Getenv("NEXT_API_KEY"),
 		CheckInterval:  5,
 		MaxConcurrency: 3,
 	}
@@ -57,9 +99,8 @@ type Monitor struct {
 func NewMonitor(cfg *config.Config) *Monitor {
 	captchaSolver := captcha.NewSolver(cfg.CaptchaAPIKey)
 	notifier := notifier.NewEmailNotifier(cfg.SendGridAPIKey)
-	database := storage.NewDatabase(cfg.DatabaseURL)
+	database := storage.NewDatabase(cfg.DatabaseURL, cfg.ApiKey)
 
-	// Get embassies from your embassy package
 	var embassies []config.EmbassyConfig
 	for _, embassy := range embassy.Embassies {
 		embassies = append(embassies, embassy)
@@ -309,96 +350,86 @@ func (m *Monitor) debugAnalysis(html string) {
 	}
 }
 
-func (m *Monitor) analyzeAppointmentResults(html string) (bool, error) {
-	// Negative patterns from your bash script
-	negativePatterns := []string{
-		"keine Termine",
-		"leider keine",
-		"Es sind zur Zeit",
-		"nicht verfügbar",
-		"no appointments",
-		"Unfortunately, there are",
-		"currently no",
-		"at this time",
-		"will be made available",
-		"freigeschaltet",
-		"regelmäßigen Abständen",
-	}
+// func (m *Monitor) analyzeAppointmentResults(html string) (bool, error) {
+// 	// Negative patterns from your bash script
+// 	negativePatterns := []string{
+// 		"keine Termine",
+// 		"leider keine",
+// 		"Es sind zur Zeit",
+// 		"nicht verfügbar",
+// 		"no appointments",
+// 		"Unfortunately, there are",
+// 		"currently no",
+// 		"at this time",
+// 		"will be made available",
+// 		"freigeschaltet",
+// 		"regelmäßigen Abständen",
+// 	}
 
-	// If CAPTCHA form appears, solution was wrong
-	if strings.Contains(html, "captchaText") {
-		// Check if there's an error message about the CAPTCHA
-		if strings.Contains(strings.ToLower(html), "falsch") || strings.Contains(strings.ToLower(html), "wrong") {
-			return false, fmt.Errorf("CAPTCHA failed - solution was wrong (explicit error)")
-		}
-		return false, fmt.Errorf("CAPTCHA failed - solution was wrong")
-	}
+// 	// If CAPTCHA form appears, solution was wrong
+// 	if strings.Contains(html, "captchaText") {
+// 		// Check if there's an error message about the CAPTCHA
+// 		if strings.Contains(strings.ToLower(html), "falsch") || strings.Contains(strings.ToLower(html), "wrong") {
+// 			return false, fmt.Errorf("CAPTCHA failed - solution was wrong (explicit error)")
+// 		}
+// 		return false, fmt.Errorf("CAPTCHA failed - solution was wrong")
+// 	}
 
-	// Check for negative indicators
-	for _, pattern := range negativePatterns {
-		if strings.Contains(strings.ToLower(html), strings.ToLower(pattern)) {
-			log.Printf("✅ Found negative indicator: '%s'", pattern)
-			return false, nil // No appointments
-		}
-	}
+// 	// Check for negative indicators
+// 	for _, pattern := range negativePatterns {
+// 		if strings.Contains(strings.ToLower(html), strings.ToLower(pattern)) {
+// 			log.Printf("✅ Found negative indicator: '%s'", pattern)
+// 			return false, nil // No appointments
+// 		}
+// 	}
 
-	// No negative patterns found - possible appointments!
-	log.Printf("🚨 No negative indicators found - appointments might be available!")
-	return true, nil
-}
+// 	// No negative patterns found - possible appointments!
+// 	log.Printf("🚨 No negative indicators found - appointments might be available!")
+// 	return true, nil
+// }
 
 // Leave this function here for testing purposes
 
-// func (m *Monitor) analyzeAppointmentResults(html string) (bool, error) {
-// 	// TEMPORARY: Force appointments to be "available" for testing
-// 	log.Printf("🚨 TEST MODE: Forcing appointments to be available")
-// 	return true, nil
+func (m *Monitor) analyzeAppointmentResults(html string) (bool, error) {
+	// TEMPORARY: Force appointments to be "available" for testing
+	log.Printf("🚨 TEST MODE: Forcing appointments to be available")
+	return true, nil
 
-// 	// Comment out the rest of the function for now:
-// 	/*
-// 	   negativePatterns := []string{
-// 	       "keine Termine",
-// 	       "leider keine",
-// 	       // ... rest of your patterns
-// 	   }
+	// Comment out the rest of the function for now:
+	/*
+	   negativePatterns := []string{
+	       "keine Termine",
+	       "leider keine",
+	       // ... rest of your patterns
+	   }
 
-// 	   // ... rest of your logic
-// 	*/
-// }
+	   // ... rest of your logic
+	*/
+}
 
 func (m *Monitor) makeAppointmentRequest(ctx context.Context, requestURL, formData string, cookies []*http.Cookie) (string, error) {
-	// make HTTP client cookie jar
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return "", fmt.Errorf("create cookie jar: %w", err)
 	}
 
-	// Set the cookies
 	u, err := url.Parse(requestURL)
 	if err != nil {
 		return "", fmt.Errorf("parse URL: %w", err)
 	}
 	jar.SetCookies(u, cookies)
 
-	client := &http.Client{
-		Jar:     jar,
-		Timeout: 30 * time.Second,
-	}
+	// SIMPLE: Use proxy package to get a client
+	client := proxy.NewProxiedClient()
 
-	fmt.Printf("🔍 Sending POST to: %s\n", requestURL)
-	fmt.Printf("🔍 Form data: %s\n", formData)
-	fmt.Printf("🔍 Cookies: %d cookies\n", len(cookies))
-	for i, cookie := range cookies {
-		fmt.Printf("   Cookie %d: %s=%s\n", i+1, cookie.Name, cookie.Value)
-	}
+	log.Printf("🔍 Sending POST to: %s", u.Host)
+	log.Printf("🔍 Cookies: %d cookies", len(cookies))
 
-	//POST request
 	req, err := http.NewRequestWithContext(ctx, "POST", requestURL, bytes.NewBufferString(formData))
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}
 
-	// Set headers
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; VisaMonitor/1.0)")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
@@ -409,15 +440,12 @@ func (m *Monitor) makeAppointmentRequest(ctx context.Context, requestURL, formDa
 	}
 	defer resp.Body.Close()
 
-	fmt.Printf("🔍 Response status: %d %s\n", resp.StatusCode, resp.Status)
-	fmt.Printf("🔍 Response cookies: %d cookies\n", len(resp.Cookies()))
+	log.Printf("🔍 Response status: %d %s", resp.StatusCode, resp.Status)
 
-	// check status
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("embassy returned status: %d %s", resp.StatusCode, resp.Status)
 	}
 
-	// Read response bod
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("read response body: %w", err)
@@ -428,7 +456,6 @@ func (m *Monitor) makeAppointmentRequest(ctx context.Context, requestURL, formDa
 	}
 
 	log.Printf("✅ Got appointment results (%d bytes)", len(body))
-
 	return string(body), nil
 }
 
@@ -442,49 +469,39 @@ func main() {
 	}
 }
 
-func loadEnvFile(filename string) error {
-	file, err := os.Open(filename)
-	if err != nil {
-		return fmt.Errorf("open .env file: %w", err)
-	}
-	defer file.Close()
+// func loadEnvFile(filename string) error {
+// 	file, err := os.Open(filename)
+// 	if err != nil {
+// 		return fmt.Errorf("open .env file: %w", err)
+// 	}
+// 	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		// Skip empty lines and comments
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
+// 	scanner := bufio.NewScanner(file)
+// 	for scanner.Scan() {
+// 		line := strings.TrimSpace(scanner.Text())
+// 		if line == "" || strings.HasPrefix(line, "#") {
+// 			continue
+// 		}
 
-		// Split key=value
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) == 2 {
-			key := strings.TrimSpace(parts[0])
-			value := strings.TrimSpace(parts[1])
-			// Remove quotes if present
-			value = strings.Trim(value, `"'`)
-
-			// Set environment variable
-			os.Setenv(key, value)
-		}
-	}
-
-	return scanner.Err()
-}
+// 		parts := strings.SplitN(line, "=", 2)
+// 		if len(parts) == 2 {
+// 			key := strings.TrimSpace(parts[0])
+// 			value := strings.TrimSpace(parts[1])
+// 			value = strings.Trim(value, `"'`)
+// 			os.Setenv(key, value)
+// 		}
+// 	}
+// 	return scanner.Err()
+// }
 
 func runLocal() {
-	// Load .env file first (same as your original main)
-	if err := loadEnvFile(".env"); err != nil {
-		log.Printf("⚠️ Could not load .env file: %v", err)
-		log.Printf("⚠️ Continuing with system environment variables only")
-	}
 
 	cfg := &config.Config{
 		CaptchaAPIKey:  os.Getenv("CAPTCHA_API_KEY"),
 		SendGridAPIKey: os.Getenv("SENDGRID_API_KEY"),
 		DatabaseURL:    os.Getenv("DATABASE_URL"),
 		FrontendURL:    os.Getenv("FRONTEND_URL"),
+		ApiKey:         os.Getenv("NEXT_API_KEY"),
 		CheckInterval:  5,
 		MaxConcurrency: 3,
 	}

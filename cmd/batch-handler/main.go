@@ -56,8 +56,7 @@ type Monitor struct {
 func NewMonitor(cfg *config.Config) *Monitor {
 	captchaSolver := captcha.NewSolver(cfg.CaptchaAPIKey)
 	notifier := notifier.NewEmailNotifier(cfg.SendGridAPIKey)
-	database := storage.NewDatabase(cfg.DatabaseURL)
-
+	database := storage.NewDatabase(cfg.DatabaseURL, cfg.ApiKey)
 	// Get embassies from your embassy package
 	var embassies []config.EmbassyConfig
 	for _, embassy := range embassy.Embassies {
@@ -296,60 +295,60 @@ func (m *Monitor) debugAnalysis(html string) {
 	}
 }
 
-// func (m *Monitor) analyzeAppointmentResults(html string) (bool, error) {
-// 	// TEMPORARY: Force appointments to be "available" for testing
-// 	log.Printf("🚨 TEST MODE: Forcing appointments to be available")
-// 	return true, nil
-
-// 	// Comment out the rest of the function for now:
-// 	/*
-// 	   negativePatterns := []string{
-// 	       "keine Termine",
-// 	       "leider keine",
-// 	       // ... rest of your patterns
-// 	   }
-
-// 	   // ... rest of your logic
-// 	*/
-// }
-
 func (m *Monitor) analyzeAppointmentResults(html string) (bool, error) {
-	// Negative patterns from your bash script
-	negativePatterns := []string{
-		"keine Termine",
-		"leider keine",
-		"Es sind zur Zeit",
-		"nicht verfügbar",
-		"no appointments",
-		"Unfortunately, there are",
-		"currently no",
-		"at this time",
-		"will be made available",
-		"freigeschaltet",
-		"regelmäßigen Abständen",
-	}
-
-	// If CAPTCHA form appears, solution was wrong
-	if strings.Contains(html, "captchaText") {
-		// Check if there's an error message about the CAPTCHA
-		if strings.Contains(strings.ToLower(html), "falsch") || strings.Contains(strings.ToLower(html), "wrong") {
-			return false, fmt.Errorf("CAPTCHA failed - solution was wrong (explicit error)")
-		}
-		return false, fmt.Errorf("CAPTCHA failed - solution was wrong")
-	}
-
-	// Check for negative indicators
-	for _, pattern := range negativePatterns {
-		if strings.Contains(strings.ToLower(html), strings.ToLower(pattern)) {
-			log.Printf("✅ Found negative indicator: '%s'", pattern)
-			return false, nil // No appointments
-		}
-	}
-
-	// No negative patterns found - possible appointments!
-	log.Printf("🚨 No negative indicators found - appointments might be available!")
+	// TEMPORARY: Force appointments to be "available" for testing
+	log.Printf("🚨 TEST MODE: Forcing appointments to be available")
 	return true, nil
+
+	// Comment out the rest of the function for now:
+	/*
+	   negativePatterns := []string{
+	       "keine Termine",
+	       "leider keine",
+	       // ... rest of your patterns
+	   }
+
+	   // ... rest of your logic
+	*/
 }
+
+// func (m *Monitor) analyzeAppointmentResults(html string) (bool, error) {
+// 	// Negative patterns from your bash script
+// 	negativePatterns := []string{
+// 		"keine Termine",
+// 		"leider keine",
+// 		"Es sind zur Zeit",
+// 		"nicht verfügbar",
+// 		"no appointments",
+// 		"Unfortunately, there are",
+// 		"currently no",
+// 		"at this time",
+// 		"will be made available",
+// 		"freigeschaltet",
+// 		"regelmäßigen Abständen",
+// 	}
+
+// 	// If CAPTCHA form appears, solution was wrong
+// 	if strings.Contains(html, "captchaText") {
+// 		// Check if there's an error message about the CAPTCHA
+// 		if strings.Contains(strings.ToLower(html), "falsch") || strings.Contains(strings.ToLower(html), "wrong") {
+// 			return false, fmt.Errorf("CAPTCHA failed - solution was wrong (explicit error)")
+// 		}
+// 		return false, fmt.Errorf("CAPTCHA failed - solution was wrong")
+// 	}
+
+// 	// Check for negative indicators
+// 	for _, pattern := range negativePatterns {
+// 		if strings.Contains(strings.ToLower(html), strings.ToLower(pattern)) {
+// 			log.Printf("✅ Found negative indicator: '%s'", pattern)
+// 			return false, nil // No appointments
+// 		}
+// 	}
+
+// 	// No negative patterns found - possible appointments!
+// 	log.Printf("🚨 No negative indicators found - appointments might be available!")
+// 	return true, nil
+// }
 
 func (m *Monitor) makeAppointmentRequest(ctx context.Context, requestURL, formData string, cookies []*http.Cookie) (string, error) {
 	// make HTTP client cookie jar
@@ -467,6 +466,7 @@ func runLocal() {
 		SendGridAPIKey: os.Getenv("SENDGRID_API_KEY"),
 		DatabaseURL:    os.Getenv("DATABASE_URL"),
 		FrontendURL:    os.Getenv("FRONTEND_URL"),
+		ApiKey:         os.Getenv("NEXT_API_KEY"),
 		CheckInterval:  5,
 		MaxConcurrency: 3,
 	}

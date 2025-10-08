@@ -18,6 +18,7 @@ type Subscriber struct {
 
 type Database struct {
 	baseURL string
+	apiKey  string
 	client  *http.Client
 }
 
@@ -28,9 +29,10 @@ type SubscribersResponse struct {
 	Error       string       `json:"error,omitempty"`
 }
 
-func NewDatabase(baseURL string) *Database {
+func NewDatabase(baseURL, apiKey string) *Database {
 	return &Database{
 		baseURL: baseURL,
+		apiKey:  apiKey,
 		client:  &http.Client{},
 	}
 }
@@ -79,10 +81,17 @@ func (db *Database) GetSubscribersWithFilters(location, tier string) ([]Subscrib
 	}
 
 	req, err := http.NewRequest("GET", apiURL, nil)
-
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
+
+	// Add API key header
+	if db.apiKey != "" {
+		req.Header.Set("x-api-key", db.apiKey)
+	}
+
+	fmt.Println("API KEY: ", db.apiKey)
+	fmt.Println("Request: ", req)
 
 	req.Header.Set("User-Agent", "VisaMonitor/1.0")
 	req.Header.Set("Accept", "application/json")
@@ -96,6 +105,11 @@ func (db *Database) GetSubscribersWithFilters(location, tier string) ([]Subscrib
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read response body: %w", err)
+	}
+
+	// Handle unauthorized response
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("API authentication failed: invalid API key")
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -128,49 +142,6 @@ func (db *Database) GetSubscribers() ([]Subscriber, error) {
 // GetSubscriberEmails returns just email strings (backward compatibility)
 func (db *Database) GetSubscriberEmails() ([]string, error) {
 	return db.GetSubscribersByLocationAndTier("", "")
-}
-
-// (for future use)
-func (db *Database) AddSubscriber(email, location, tier string) error {
-	if db.baseURL == "" {
-		return fmt.Errorf("database URL not configured")
-	}
-
-	payload := map[string]string{
-		"email":    email,
-		"location": location,
-		"tier":     tier,
-	}
-
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal payload: %w", err)
-	}
-
-	url := fmt.Sprintf("%s/api/submit", db.baseURL)
-	req, err := http.NewRequest("POST", url, strings.NewReader(string(jsonData)))
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "VisaMonitor/1.0")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := db.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("API request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API returned status: %d %s, body: %s",
-			resp.StatusCode, resp.Status, string(body))
-	}
-
-	fmt.Printf("✅ Subscriber added: %s (location: %s, tier: %s)\n", email, location, tier)
-	return nil
 }
 
 // HealthCheck verifies the database connection

@@ -4,7 +4,9 @@ type Config struct {
 	CaptchaAPIKey  string
 	SendGridAPIKey string
 	DatabaseURL    string
-	FrontendURL    string // Add this for unsubscribe links
+	FrontendURL    string
+	ApiKey         string
+	ProxyUrls      []string
 	CheckInterval  int
 	MaxConcurrency int
 }
