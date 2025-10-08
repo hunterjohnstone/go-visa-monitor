@@ -21,6 +21,7 @@ import (
 	"go-visa-monitor/internal/config"
 	"go-visa-monitor/internal/embassy"
 	"go-visa-monitor/internal/notifier"
+	"go-visa-monitor/internal/proxy" // Add proxy import
 	"go-visa-monitor/internal/storage"
 
 	"github.com/aws/aws-lambda-go/lambda"
@@ -28,6 +29,14 @@ import (
 
 func BatchHandler(ctx context.Context) (string, error) {
 	log.Println("📦 Starting BATCH notifier (free users only)...")
+
+	// Log proxy status at startup
+	proxyCount := proxy.GetProxyCount()
+	if proxyCount > 0 {
+		log.Printf("🎯 Using %d proxies for requests", proxyCount)
+	} else {
+		log.Printf("⚠️ No proxies configured - using direct connections")
+	}
 
 	cfg := &config.Config{
 		CaptchaAPIKey:  os.Getenv("CAPTCHA_API_KEY"),
@@ -44,7 +53,6 @@ func BatchHandler(ctx context.Context) (string, error) {
 	return "Batch check completed", nil
 }
 
-// Modified Monitor with instant-specific logic
 type Monitor struct {
 	config        *config.Config
 	captchaSolver *captcha.Solver
@@ -57,7 +65,7 @@ func NewMonitor(cfg *config.Config) *Monitor {
 	captchaSolver := captcha.NewSolver(cfg.CaptchaAPIKey)
 	notifier := notifier.NewEmailNotifier(cfg.SendGridAPIKey)
 	database := storage.NewDatabase(cfg.DatabaseURL, cfg.ApiKey)
-	// Get embassies from your embassy package
+
 	var embassies []config.EmbassyConfig
 	for _, embassy := range embassy.Embassies {
 		embassies = append(embassies, embassy)
@@ -71,10 +79,10 @@ func NewMonitor(cfg *config.Config) *Monitor {
 		embassies:     embassies,
 	}
 }
+
 func (m *Monitor) RunBatchCheck(ctx context.Context) {
 	log.Println("🔍 Checking embassies for BATCH alerts (free users only)...")
 
-	// Same embassy checking logic but with batch alert handling
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, m.config.MaxConcurrency)
 	results := make(chan *embassy.CheckResult, len(m.embassies))
@@ -97,7 +105,7 @@ func (m *Monitor) RunBatchCheck(ctx context.Context) {
 	}()
 
 	for result := range results {
-		m.handleBatchResult(result) // Use batch-specific handler
+		m.handleBatchResult(result)
 	}
 }
 
@@ -109,22 +117,20 @@ func (m *Monitor) handleBatchResult(result *embassy.CheckResult) {
 
 	if result.Available {
 		log.Printf("🚨 APPOINTMENTS AVAILABLE in %s! Sending BATCH alerts", result.Embassy)
-		m.SendBatchAlerts(result) // Only sends to free users
+		m.SendBatchAlerts(result)
 	} else {
 		log.Printf("✅ No appointments in %s", result.Embassy)
 	}
 }
 
-// SendBatchAlerts - ONLY for free users in specific location
 func (m *Monitor) SendBatchAlerts(result *embassy.CheckResult) {
 	location := m.getLocationFromEmbassy(result.Embassy)
 	log.Printf("📦 Sending BATCH alerts for %s appointments (location: %s)!", result.Embassy, location)
 
-	// This ONLY gets free subscribers for this location
 	subscribers, err := m.database.GetSubscribersByLocationAndTier(location, "free")
 	if err != nil {
 		log.Printf("❌ Failed to fetch free subscribers for %s: %v", location, err)
-		return // Don't fallback for free tier
+		return
 	}
 
 	if len(subscribers) == 0 {
@@ -161,7 +167,6 @@ func (m *Monitor) getLocationFromEmbassy(embassyName string) string {
 		return location
 	}
 
-	// check for partial matches if above didnt work
 	lowerEmbassyName := strings.ToLower(embassyName)
 	for key, location := range locationMap {
 		if strings.Contains(lowerEmbassyName, strings.ToLower(key)) {
@@ -177,12 +182,10 @@ func (m *Monitor) getLocationFromEmbassy(embassyName string) string {
 func (m *Monitor) checkEmbassy(ctx context.Context, embassyConfig config.EmbassyConfig) *embassy.CheckResult {
 	log.Printf("Checking %s embassy...", embassyConfig.Name)
 
-	// Try up to 3 times if CAPTCHA fails
 	maxRetries := 3
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		if attempt > 1 {
 			log.Printf("🔄 CAPTCHA attempt %d/%d for %s", attempt, maxRetries, embassyConfig.Name)
-			// Small delay between retries
 			time.Sleep(2 * time.Second)
 		}
 
@@ -199,7 +202,6 @@ func (m *Monitor) checkEmbassy(ctx context.Context, embassyConfig config.Embassy
 			continue
 		}
 
-		// cookies to appointment check
 		available, err := m.checkAppointments(ctx, embassyConfig, solveResult.Text, solveResult.Cookies, solveResult.JsessionID)
 		if err != nil {
 			if strings.Contains(err.Error(), "CAPTCHA failed") {
@@ -238,10 +240,8 @@ func (m *Monitor) checkEmbassy(ctx context.Context, embassyConfig config.Embassy
 func (m *Monitor) checkAppointments(ctx context.Context, embassyConfig config.EmbassyConfig, captchaText string, cookies []*http.Cookie, jsessionid string) (bool, error) {
 	log.Printf("Step 5: Checking appointments for %s...", embassyConfig.Name)
 
-	// Use the URL with jsessionid!
 	appointmentURL := fmt.Sprintf("%s;jsessionid=%s", embassyConfig.URL, jsessionid)
 
-	// Prepare form data using url.Values for proper encoding
 	formData := url.Values{
 		"captchaText":                  {captchaText},
 		"rebooking":                    {"false"},
@@ -253,13 +253,11 @@ func (m *Monitor) checkAppointments(ctx context.Context, embassyConfig config.Em
 
 	fmt.Printf("🔍 CAPTCHA text being sent: %s\n", captchaText)
 
-	// appointment check request
 	html, err := m.makeAppointmentRequest(ctx, appointmentURL, formData, cookies)
 	if err != nil {
 		return false, fmt.Errorf("appointment request failed: %w", err)
 	}
 
-	// Analyze
 	available, err := m.analyzeAppointmentResults(html)
 	if err != nil {
 		return false, err
@@ -268,7 +266,6 @@ func (m *Monitor) checkAppointments(ctx context.Context, embassyConfig config.Em
 	if available {
 		log.Printf("🚨 POSSIBLE APPOINTMENTS DETECTED in %s!", embassyConfig.Name)
 		m.debugAnalysis(html)
-		// m.saveAppointmentResults(html, embassyConfig.Name)
 	} else {
 		log.Printf("No appointments available in %s", embassyConfig.Name)
 	}
@@ -296,20 +293,166 @@ func (m *Monitor) debugAnalysis(html string) {
 }
 
 func (m *Monitor) analyzeAppointmentResults(html string) (bool, error) {
-	// TEMPORARY: Force appointments to be "available" for testing
-	log.Printf("🚨 TEST MODE: Forcing appointments to be available")
+	// Negative patterns from your bash script
+	negativePatterns := []string{
+		"keine Termine",
+		"leider keine",
+		"Es sind zur Zeit",
+		"nicht verfügbar",
+		"no appointments",
+		"Unfortunately, there are",
+		"currently no",
+		"at this time",
+		"will be made available",
+		"freigeschaltet",
+		"regelmäßigen Abständen",
+	}
+
+	// If CAPTCHA form appears, solution was wrong
+	if strings.Contains(html, "captchaText") {
+		// Check if there's an error message about the CAPTCHA
+		if strings.Contains(strings.ToLower(html), "falsch") || strings.Contains(strings.ToLower(html), "wrong") {
+			return false, fmt.Errorf("CAPTCHA failed - solution was wrong (explicit error)")
+		}
+		return false, fmt.Errorf("CAPTCHA failed - solution was wrong")
+	}
+
+	// Check for negative indicators
+	for _, pattern := range negativePatterns {
+		if strings.Contains(strings.ToLower(html), strings.ToLower(pattern)) {
+			log.Printf("✅ Found negative indicator: '%s'", pattern)
+			return false, nil // No appointments
+		}
+	}
+
+	// No negative patterns found - possible appointments!
+	log.Printf("🚨 No negative indicators found - appointments might be available!")
 	return true, nil
+}
 
-	// Comment out the rest of the function for now:
-	/*
-	   negativePatterns := []string{
-	       "keine Termine",
-	       "leider keine",
-	       // ... rest of your patterns
-	   }
+// UPDATED: Use proxy for appointment requests
+func (m *Monitor) makeAppointmentRequest(ctx context.Context, requestURL, formData string, cookies []*http.Cookie) (string, error) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return "", fmt.Errorf("create cookie jar: %w", err)
+	}
 
-	   // ... rest of your logic
-	*/
+	u, err := url.Parse(requestURL)
+	if err != nil {
+		return "", fmt.Errorf("parse URL: %w", err)
+	}
+	jar.SetCookies(u, cookies)
+
+	// USE PROXY: Get a proxied client instead of direct connection
+	client := proxy.NewProxiedClient()
+
+	log.Printf("🔍 Sending POST to: %s", u.Host)
+	log.Printf("🔍 Cookies: %d cookies", len(cookies))
+
+	req, err := http.NewRequestWithContext(ctx, "POST", requestURL, bytes.NewBufferString(formData))
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; VisaMonitor/1.0)")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	log.Printf("🔍 Response status: %d %s", resp.StatusCode, resp.Status)
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("embassy returned status: %d %s", resp.StatusCode, resp.Status)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read response body: %w", err)
+	}
+
+	if len(body) == 0 {
+		return "", fmt.Errorf("empty response from embassy")
+	}
+
+	log.Printf("✅ Got appointment results (%d bytes)", len(body))
+	return string(body), nil
+}
+
+func main() {
+	if os.Getenv("LOCAL_DEV") == "true" {
+		runLocal()
+	} else {
+		lambda.Start(BatchHandler)
+	}
+}
+
+func loadEnvFile(filename string) error {
+	file, err := os.Open(filename)
+	if err != nil {
+		return fmt.Errorf("open .env file: %w", err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			key := strings.TrimSpace(parts[0])
+			value := strings.TrimSpace(parts[1])
+			value = strings.Trim(value, `"'`)
+			os.Setenv(key, value)
+		}
+	}
+	return scanner.Err()
+}
+
+func runLocal() {
+	// Load .env file first
+	if err := loadEnvFile(".env"); err != nil {
+		log.Printf("⚠️ Could not load .env file: %v", err)
+	}
+
+	cfg := &config.Config{
+		CaptchaAPIKey:  os.Getenv("CAPTCHA_API_KEY"),
+		SendGridAPIKey: os.Getenv("SENDGRID_API_KEY"),
+		DatabaseURL:    os.Getenv("DATABASE_URL"),
+		FrontendURL:    os.Getenv("FRONTEND_URL"),
+		ApiKey:         os.Getenv("NEXT_API_KEY"),
+		CheckInterval:  5,
+		MaxConcurrency: 3,
+	}
+
+	if cfg.CaptchaAPIKey == "" {
+		log.Fatal("❌ CAPTCHA_API_KEY environment variable is required")
+	}
+
+	monitor := NewMonitor(cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		sig := <-sigCh
+		log.Printf("Received signal: %v, shutting down...", sig)
+		cancel()
+	}()
+
+	log.Println("🚀 Starting LOCAL embassy check...")
+	monitor.RunBatchCheck(ctx)
+	log.Println("Monitor stopped gracefully")
 }
 
 // func (m *Monitor) analyzeAppointmentResults(html string) (bool, error) {
@@ -349,147 +492,3 @@ func (m *Monitor) analyzeAppointmentResults(html string) (bool, error) {
 // 	log.Printf("🚨 No negative indicators found - appointments might be available!")
 // 	return true, nil
 // }
-
-func (m *Monitor) makeAppointmentRequest(ctx context.Context, requestURL, formData string, cookies []*http.Cookie) (string, error) {
-	// make HTTP client cookie jar
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		return "", fmt.Errorf("create cookie jar: %w", err)
-	}
-
-	// Set the cookies
-	u, err := url.Parse(requestURL)
-	if err != nil {
-		return "", fmt.Errorf("parse URL: %w", err)
-	}
-	jar.SetCookies(u, cookies)
-
-	client := &http.Client{
-		Jar:     jar,
-		Timeout: 30 * time.Second,
-	}
-
-	fmt.Printf("🔍 Sending POST to: %s\n", requestURL)
-	fmt.Printf("🔍 Form data: %s\n", formData)
-	fmt.Printf("🔍 Cookies: %d cookies\n", len(cookies))
-	for i, cookie := range cookies {
-		fmt.Printf("   Cookie %d: %s=%s\n", i+1, cookie.Name, cookie.Value)
-	}
-
-	//POST request
-	req, err := http.NewRequestWithContext(ctx, "POST", requestURL, bytes.NewBufferString(formData))
-	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
-	}
-
-	// Set headers
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; VisaMonitor/1.0)")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("HTTP request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	fmt.Printf("🔍 Response status: %d %s\n", resp.StatusCode, resp.Status)
-	fmt.Printf("🔍 Response cookies: %d cookies\n", len(resp.Cookies()))
-
-	// check status
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("embassy returned status: %d %s", resp.StatusCode, resp.Status)
-	}
-
-	// Read response bod
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read response body: %w", err)
-	}
-
-	if len(body) == 0 {
-		return "", fmt.Errorf("empty response from embassy")
-	}
-
-	log.Printf("✅ Got appointment results (%d bytes)", len(body))
-
-	return string(body), nil
-}
-func main() {
-	if os.Getenv("LOCAL_DEV") == "true" {
-		runLocal()
-	} else {
-		lambda.Start(BatchHandler)
-	}
-}
-
-func loadEnvFile(filename string) error {
-	file, err := os.Open(filename)
-	if err != nil {
-		return fmt.Errorf("open .env file: %w", err)
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		// Skip empty lines and comments
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		// Split key=value
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) == 2 {
-			key := strings.TrimSpace(parts[0])
-			value := strings.TrimSpace(parts[1])
-			// Remove quotes if present
-			value = strings.Trim(value, `"'`)
-
-			// Set environment variable
-			os.Setenv(key, value)
-		}
-	}
-
-	return scanner.Err()
-}
-
-func runLocal() {
-	// Load .env file first (same as your original main)
-	if err := loadEnvFile(".env"); err != nil {
-		log.Printf("⚠️ Could not load .env file: %v", err)
-		log.Printf("⚠️ Continuing with system environment variables only")
-	}
-
-	cfg := &config.Config{
-		CaptchaAPIKey:  os.Getenv("CAPTCHA_API_KEY"),
-		SendGridAPIKey: os.Getenv("SENDGRID_API_KEY"),
-		DatabaseURL:    os.Getenv("DATABASE_URL"),
-		FrontendURL:    os.Getenv("FRONTEND_URL"),
-		ApiKey:         os.Getenv("NEXT_API_KEY"),
-		CheckInterval:  5,
-		MaxConcurrency: 3,
-	}
-
-	if cfg.CaptchaAPIKey == "" {
-		log.Fatal("❌ CAPTCHA_API_KEY environment variable is required")
-	}
-
-	monitor := NewMonitor(cfg)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		sig := <-sigCh
-		log.Printf("Received signal: %v, shutting down...", sig)
-		cancel()
-	}()
-
-	log.Println("🚀 Starting LOCAL embassy check...")
-	monitor.RunBatchCheck(ctx)
-	log.Println("Monitor stopped gracefully")
-}
