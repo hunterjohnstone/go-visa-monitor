@@ -118,7 +118,7 @@ func NewMonitor(cfg *config.Config) *Monitor {
 func (m *Monitor) RunInstantCheck(ctx context.Context) {
 	log.Println("🔍 Checking embassies for INSTANT alerts (paid users only)...")
 
-	// Your existing checkAllEmbassies logic but with instant alert handling
+	// like the existing checkAllEmbassies logic but with instant alert handling
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, m.config.MaxConcurrency)
 	results := make(chan *embassy.CheckResult, len(m.embassies))
@@ -141,7 +141,7 @@ func (m *Monitor) RunInstantCheck(ctx context.Context) {
 	}()
 
 	for result := range results {
-		m.handleInstantResult(result) // Use instant-specific handler
+		m.handleInstantResult(result)
 	}
 }
 
@@ -202,6 +202,7 @@ func (m *Monitor) getLocationFromEmbassy(embassyName string) string {
 		"New Delhi": "newdelhi",
 		"Istanbul":  "istanbul",
 		"Moscow":    "moscow",
+		"Accre":     "accre",
 	}
 
 	if location, exists := locationMap[embassyName]; exists {
@@ -219,14 +220,6 @@ func (m *Monitor) getLocationFromEmbassy(embassyName string) string {
 
 	log.Printf("⚠️ No location mapping found for embassy: %s", embassyName)
 	return "windhoek"
-}
-
-func (m *Monitor) getAdminEmails() []string {
-	adminEmail := os.Getenv("ADMIN_EMAIL")
-	if adminEmail != "" {
-		return []string{adminEmail}
-	}
-	return []string{"noreply@embassyalerts.com"}
 }
 
 func (m *Monitor) checkEmbassy(ctx context.Context, embassyConfig config.EmbassyConfig) *embassy.CheckResult {
@@ -293,10 +286,8 @@ func (m *Monitor) checkEmbassy(ctx context.Context, embassyConfig config.Embassy
 func (m *Monitor) checkAppointments(ctx context.Context, embassyConfig config.EmbassyConfig, captchaText string, cookies []*http.Cookie, jsessionid string) (bool, error) {
 	log.Printf("Step 5: Checking appointments for %s...", embassyConfig.Name)
 
-	// Use the URL with jsessionid!
 	appointmentURL := fmt.Sprintf("%s;jsessionid=%s", embassyConfig.URL, jsessionid)
 
-	// Prepare form data using url.Values for proper encoding
 	formData := url.Values{
 		"captchaText":                  {captchaText},
 		"rebooking":                    {"false"},
@@ -314,7 +305,6 @@ func (m *Monitor) checkAppointments(ctx context.Context, embassyConfig config.Em
 		return false, fmt.Errorf("appointment request failed: %w", err)
 	}
 
-	// Analyze
 	available, err := m.analyzeAppointmentResults(html)
 	if err != nil {
 		return false, err

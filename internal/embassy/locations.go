@@ -27,4 +27,13 @@ var Embassies = map[string]config.EmbassyConfig{
 		CategoryID:   "3579",
 		URL:          "https://service2.diplo.de/rktermin/extern/appointment_showMonth.do",
 	},
+	"accra": {
+		Name:         "accre",
+		LocationCode: "accr",
+		RealmID:      "279",
+		CategoryID:   "2978",
+		URL:          "https://service2.diplo.de/rktermin/extern/appointment_showMonth.do",
+	},
 }
+
+//https://service2.diplo.de/rktermin/extern/appointment_showMonth.do?locationCode=accr&realmId=279&categoryId=2978
