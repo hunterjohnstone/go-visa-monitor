@@ -169,7 +169,7 @@ func (m *Monitor) getLocationFromEmbassy(embassyName string) string {
 		"New Delhi": "newdelhi",
 		"Istanbul":  "istanbul",
 		"Moscow":    "moscow",
-		"Accre":     "accre",
+		"Accra":     "accra",
 	}
 
 	if location, exists := locationMap[embassyName]; exists {
